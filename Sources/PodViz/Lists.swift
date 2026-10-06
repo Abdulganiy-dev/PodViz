@@ -46,7 +46,7 @@ struct PodsTab: View {
     private func rows(_ pods: [PodItem], maxBytes: Int64) -> some View {
         ForEach(pods) { pod in
             PodRow(pod: pod, maxBytes: maxBytes, color: colors[pod.name] ?? Color.secondary.opacity(0.5),
-                   isCurrent: pod.name == session.currentPod)
+                   isCurrent: pod.name == session.currentPod, parallel: session.parallelDownloads)
                 .id(pod.name)
         }
     }
@@ -106,6 +106,7 @@ struct PodRow: View {
     let maxBytes: Int64
     let color: Color
     let isCurrent: Bool
+    var parallel = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -183,7 +184,7 @@ struct PodRow: View {
     private var detail: String {
         switch pod.status {
         case .queued:
-            return "Waiting"
+            return parallel ? "Queued for download" : "Waiting"
         case .downloading:
             let via = pod.source == .unknown ? "" : " via \(pod.source.label)"
             return pod.downloadBytes > 0 ? "Downloading\(via) · \(Fmt.bytes(pod.downloadBytes))" : "Downloading\(via)…"

@@ -30,10 +30,16 @@ public final class PodSession: Identifiable {
     public private(set) var podfileDependencies: Int?
     public private(set) var podsFolderBytes: Int64?
     public private(set) var bytesPerSecond: Double = 0
+    /// CocoaPods' `parallel_pod_downloads` option is on: downloads run in a thread pool before the install loop.
+    public private(set) var parallelDownloads = false
 
     @ObservationIgnored private var podIndex: [String: Int] = [:]
     @ObservationIgnored private var running: Set<Int> = []
     @ObservationIgnored private var completeTransfers: Set<Int> = []
+    /// Parallel mode: pods queued for download, in order, and those already matched to a transfer.
+    @ObservationIgnored private var downloadQueue: [String] = []
+    @ObservationIgnored private var claimed: Set<String> = []
+    @ObservationIgnored private var specSources: [String: PodspecSource] = [:]
     @ObservationIgnored private var inManifest = false
     @ObservationIgnored private var preDownloadPod: String?
     @ObservationIgnored private var redirects: [String: String] = [:]
@@ -233,13 +239,21 @@ public final class PodSession: Identifiable {
             if let version { pods[i].version = version }
             if let previous { pods[i].previousVersion = previous }
             switch action {
-            case .downloading: // parallel pre-download pass (installation option)
-                pods[i].status = .downloading
-                pods[i].startedAt = pods[i].startedAt ?? Date()
-                activity = "Downloading \(name)"
+            case .downloading:
+                // Parallel mode prints every title up front, then a thread pool works through the queue.
+                // Output from those threads doesn't name the pod, so remember each pod's source to match it.
+                parallelDownloads = true
+                pods[i].status = .queued
+                if !downloadQueue.contains(name) { downloadQueue.append(name) }
+                if specSources[name] == nil,
+                   let source = PodspecSource.lookup(name: name, version: pods[i].version, projectPath: projectPath) {
+                    specSources[name] = source
+                }
+                activity = "Queued \(downloadQueue.count) pods for parallel download"
             case .installing:
                 if pods[i].change == .unknown { pods[i].change = previous == nil ? .added : .changed }
-                pods[i].status = .installing
+                // Already downloaded and copied into Pods/ by the parallel pass.
+                if pods[i].status != .done && pods[i].status != .cached { pods[i].status = .installing }
                 pods[i].startedAt = pods[i].startedAt ?? Date()
                 currentPod = name
                 activity = "Installing \(name)"
@@ -278,6 +292,13 @@ public final class PodSession: Identifiable {
                 }
             }
             activity = pods[i].source == .cache ? "Copying \(name) from cache" : "Installing \(name)"
+            if parallelDownloads && currentPod == nil && phase == .downloading {
+                claimed.insert(name)
+                pods[i].status = pods[i].source == .cache ? .cached : .done
+                pods[i].finishedAt = Date()
+                measureDisk(name)
+                activity = parallelActivity
+            }
 
         case let .command(executable, args):
             handleCommand(executable, args)
@@ -315,7 +336,10 @@ public final class PodSession: Identifiable {
 
     private func handleCommand(_ executable: String, _ args: [String]) {
         let tool = (executable as NSString).lastPathComponent
-        let owner = currentPod ?? preDownloadPod
+        var owner = currentPod ?? preDownloadPod
+        // A command on a running transfer's files (`git -C <dir>`, `unzip <archive>`) belongs to that transfer.
+        let pathMatch = running.sorted().first { idx in requests[idx].localPath.map(args.contains) ?? false }
+        if owner == nil, let pathMatch { owner = requests[pathMatch].pod }
         switch tool {
         case "git":
             // Any git command (even rev-parse) means the previous transfer for this pod has landed.
@@ -340,36 +364,44 @@ public final class PodSession: Identifiable {
             }
             var ref: String?
             if let b = rest.firstIndex(where: { $0 == "--branch" || $0 == "-b" }), b + 1 < rest.count { ref = rest[b + 1] }
-            finishRequests(owner: owner)
+            if owner == nil, sub == "clone", let url { owner = claimQueued(url: url, ref: ref) }
+            if owner != nil || !parallelDownloads { finishRequests(owner: owner) }
             addRequest(kind: .git, verb: sub, url: url ?? "git \(sub)", note: ref, state: .running, localPath: dest, pod: owner)
             if let owner, let p = podIndex[owner], sub == "clone" || sub == "fetch" {
                 pods[p].source = .git
                 pods[p].status = .downloading
+                if parallelDownloads && currentPod == nil { pods[p].startedAt = pods[p].startedAt ?? Date() }
                 if let dest { pods[p].downloadPath = dest }
                 if let url { pods[p].remoteURL = url }
-                activity = "Cloning \(owner)"
+                activity = parallelDownloads && currentPod == nil ? parallelActivity : "Cloning \(owner)"
             }
 
         case "curl":
             guard let url = args.first(where: { $0.hasPrefix("http://") || $0.hasPrefix("https://") }) else { return }
             var dest: String?
             if let o = args.firstIndex(of: "-o"), o + 1 < args.count { dest = args[o + 1] }
-            finishRequests(owner: owner)
+            if owner == nil { owner = claimQueued(url: url, ref: nil) }
+            if owner != nil || !parallelDownloads { finishRequests(owner: owner) }
             addRequest(kind: .http, verb: "GET", url: url, state: .running, localPath: dest, pod: owner)
             if let owner, let p = podIndex[owner] {
                 pods[p].source = .http
                 pods[p].status = .downloading
                 pods[p].downloadPath = dest
                 pods[p].remoteURL = url
-                activity = "Downloading \(owner)"
+                if parallelDownloads && currentPod == nil { pods[p].startedAt = pods[p].startedAt ?? Date() }
+                activity = parallelDownloads && currentPod == nil ? parallelActivity : "Downloading \(owner)"
             }
 
         case "unzip", "tar", "xz", "bsdtar", "ditto":
-            finishRequests(owner: owner)
-            if let owner { activity = "Extracting \(owner)" }
+            if let pathMatch {
+                finishRequest(pathMatch)
+            } else if owner != nil || !parallelDownloads {
+                finishRequests(owner: owner)
+            }
+            if let owner, !parallelDownloads || currentPod != nil { activity = "Extracting \(owner)" }
 
         case "hg", "svn", "bzr", "scp":
-            finishRequests(owner: owner)
+            if owner != nil || !parallelDownloads { finishRequests(owner: owner) }
             let url = args.first(where: Self.looksLikeRemote) ?? tool
             addRequest(kind: .other, verb: tool, url: url, state: .running, pod: owner)
 
@@ -421,8 +453,10 @@ public final class PodSession: Identifiable {
         if pods[i].status.isActive {
             if pods[i].source == .unknown { pods[i].source = .local }
             pods[i].status = pods[i].source == .cache ? .cached : .done
+            pods[i].finishedAt = Date()
+        } else if pods[i].finishedAt == nil {
+            pods[i].finishedAt = Date()
         }
-        pods[i].finishedAt = Date()
         measureDisk(name)
     }
 
@@ -446,15 +480,43 @@ public final class PodSession: Identifiable {
 
     private func finishRequests(owner: String?, all: Bool = false, state: RequestState = .ok) {
         for idx in running.sorted() where all || requests[idx].pod == owner {
-            // curl has exited by now, so an archive still on disk is complete.
-            if requests[idx].kind == .http, let path = requests[idx].localPath, FileManager.default.fileExists(atPath: path) {
-                completeTransfers.insert(idx)
-            }
-            sampleRequest(idx)
-            requests[idx].state = state
-            requests[idx].finishedAt = Date()
-            running.remove(idx)
+            finishRequest(idx, state: state)
         }
+    }
+
+    private func finishRequest(_ idx: Int, state: RequestState = .ok) {
+        // curl has exited by now, so an archive still on disk is complete.
+        if requests[idx].kind == .http, let path = requests[idx].localPath, FileManager.default.fileExists(atPath: path) {
+            completeTransfers.insert(idx)
+        }
+        sampleRequest(idx)
+        requests[idx].state = state
+        requests[idx].finishedAt = Date()
+        running.remove(idx)
+    }
+
+    /// Parallel mode: the queued pod a `git clone` / `curl` belongs to, matched on the podspec's source.
+    /// Pods sharing a repo (e.g. Firebase) are told apart by the tag; ties go to the earliest in the queue,
+    /// which is the order the thread pool starts them.
+    private func claimQueued(url: String, ref: String?) -> String? {
+        guard parallelDownloads else { return nil }
+        let open = downloadQueue.filter { !claimed.contains($0) && podIndex[$0].map { pods[$0].status == .queued } == true }
+        let sameSource = open.filter { specSources[$0]?.matches(url: url, ref: nil) == true }
+        let key = PodspecSource.normalize(url)
+        let pick = sameSource.first { ref != nil && specSources[$0]?.ref == ref }
+            ?? sameSource.first
+            ?? open.first { specSources[$0] == nil && key.hasSuffix("/" + $0.lowercased()) }
+        if let pick { claimed.insert(pick) }
+        return pick
+    }
+
+    private var parallelActivity: String {
+        let queued = downloadQueue.compactMap { podIndex[$0].map { pods[$0] } }
+        let active = queued.filter { $0.status == .downloading }.count
+        let finished = queued.filter { $0.status == .done || $0.status == .cached }.count
+        return active > 0
+            ? "Downloading \(active) at once · \(finished)/\(queued.count) done"
+            : "Downloaded \(finished)/\(queued.count) pods"
     }
 
     /// Synchronous: the temp checkout can disappear moments later. Git transfers are measured

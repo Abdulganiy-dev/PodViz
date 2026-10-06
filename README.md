@@ -54,6 +54,10 @@ After a run you can switch between **Project** and **Last run**.
 | Size of each pod | `Pods/<Name>` on disk after it installs; the total and the whole `Pods/` folder at the end |
 | Network requests | CDN spec fetches (200 / 302 redirect / 304 / 404, with sizes), `git clone`/`fetch`/`ls-remote`, `curl` downloads |
 
+With `install! 'cocoapods', :parallel_pod_downloads => true` in the Podfile, CocoaPods downloads several pods at once and
+its output no longer says which pod each `git clone` or `curl` belongs to. PodViz matches each transfer to its pod
+using the podspec's source URL and tag, read from the local spec repos.
+
 Very fast clones can finish between samples; their fetched size falls back to the cached copy's size.
 
 ## Login item and agent skill

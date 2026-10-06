@@ -12,6 +12,7 @@ Reports run status, the install plan (new / updated / up to date / removed pods)
 arrived (git, HTTP, download cache, local), its size in Pods/, and every network request.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -84,6 +85,38 @@ def host_of(url):
     return ""
 
 
+def normalize_remote(url):
+    s = url.lower()
+    for scheme in ("https://", "http://", "git://", "ssh://"):
+        if s.startswith(scheme):
+            s = s[len(scheme):]
+    if s.startswith("git@"):
+        s = s[4:].replace(":", "/", 1)
+    s = s.rstrip("/")
+    return s[:-4] if s.endswith(".git") else s
+
+
+def podspec_source(name, version, project):
+    """The podspec's source (git + ref, or http), from Pods/Local Podspecs or the local spec repos."""
+    paths = [os.path.join(project or "", "Pods", "Local Podspecs", f"{name}.podspec.json")]
+    repos_root = os.environ.get("CP_REPOS_DIR", os.path.expanduser("~/.cocoapods/repos"))
+    if version and os.path.isdir(repos_root):
+        shard = "/".join(hashlib.md5(name.encode()).hexdigest()[:3])
+        repos = sorted(os.listdir(repos_root), key=lambda r: r != "trunk")
+        for repo in repos:
+            base = os.path.join(repos_root, repo)
+            paths += [f"{base}/Specs/{shard}/{name}/{version}/{name}.podspec.json",
+                      f"{base}/{name}/{version}/{name}.podspec.json"]
+    for path in paths:
+        try:
+            source = json.load(open(path)).get("source") or {}
+        except (OSError, ValueError):
+            continue
+        ref = source.get("tag") or source.get("branch") or source.get("commit")
+        return {"git": source.get("git"), "ref": str(ref) if ref else None, "http": source.get("http")}
+    return None
+
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)
@@ -92,7 +125,7 @@ def pid_alive(pid):
         return False
 
 
-def parse(path):
+def parse(path, cwd=None):
     run = {
         "log": path, "meta": {}, "phase": "preparing", "activity": None,
         "pods": OrderedDict(), "requests": [], "cdn_status": Counter(), "cdn_local_hits": 0,
@@ -103,6 +136,28 @@ def parse(path):
     in_manifest = False
     current = None
     pre_download = None
+    # Parallel downloads (`install! 'cocoapods', :parallel_pod_downloads => true`): output from the download
+    # threads doesn't name the pod, so transfers are matched to queued pods by their podspec source.
+    queue, claimed, sources = [], set(), {}
+
+    def claim(url, ref):
+        if not queue:
+            return None
+        key = normalize_remote(url)
+        open_pods = [n for n in queue if n not in claimed and pods[n]["status"] == "queued"]
+        same = [n for n in open_pods if sources.get(n) and key in
+                {normalize_remote(sources[n]["git"] or ""), normalize_remote(sources[n]["http"] or "")}]
+        pick = next((n for n in same if ref and sources[n]["ref"] == ref), None) or (same[0] if same else None) \
+            or next((n for n in open_pods if n not in sources and key.endswith("/" + n.lower())), None)
+        if pick:
+            claimed.add(pick)
+        return pick
+
+    def path_owner(args):
+        for r in run["requests"]:
+            if r["state"] == "running" and r.get("path") and r["path"] in args:
+                return r
+        return None
 
     def pod(name):
         return pods.setdefault(name, {"name": name, "version": None, "previous": None, "change": "unknown",
@@ -135,6 +190,7 @@ def parse(path):
                 run["meta"][key] = value
                 continue
             owner = current or pre_download
+            project = cwd or run["meta"].get("cwd")
 
             m = CDN_LINE.match(t)
             if m:
@@ -163,6 +219,9 @@ def parse(path):
             if t.startswith("$ "):
                 parts = t[2:].split(" ")
                 tool, args = os.path.basename(parts[0]), parts[1:]
+                by_path = path_owner(args)
+                if owner is None and by_path:
+                    owner = by_path["pod"]
                 if tool == "git":
                     i, sub = 0, None
                     while i < len(args):
@@ -178,20 +237,33 @@ def parse(path):
                         rest = args[i:]
                         url = next((a for a in rest if a.startswith(REMOTE)), f"git {sub}")
                         ref = rest[rest.index("--branch") + 1] if "--branch" in rest and rest.index("--branch") + 1 < len(rest) else None
-                        finish_requests(owner)
+                        if owner is None and sub == "clone":
+                            owner = claim(url, ref)
+                        if owner or not queue:
+                            finish_requests(owner)
+                        positional = [a for a in rest if not a.startswith("-")]
+                        dest = positional[positional.index(url) + 1] if url in positional and positional.index(url) + 1 < len(positional) else None
                         run["requests"].append({"kind": "git", "verb": sub, "url": url, "ref": ref, "status": None,
-                                                "state": "running", "bytes": None, "pod": owner})
+                                                "state": "running", "bytes": None, "pod": owner, "path": dest})
                         if owner and sub in ("clone", "fetch"):
                             pod(owner).update(source="git", status="downloading", url=url)
                 elif tool == "curl":
                     url = next((a for a in args if a.startswith(("http://", "https://"))), None)
                     if url:
-                        finish_requests(owner)
-                        run["requests"].append({"kind": "http", "url": url, "status": None, "state": "running", "bytes": None, "pod": owner})
+                        if owner is None:
+                            owner = claim(url, None)
+                        if owner or not queue:
+                            finish_requests(owner)
+                        dest = args[args.index("-o") + 1] if "-o" in args and args.index("-o") + 1 < len(args) else None
+                        run["requests"].append({"kind": "http", "url": url, "status": None, "state": "running",
+                                                "bytes": None, "pod": owner, "path": dest})
                         if owner:
                             pod(owner).update(source="http", status="downloading", url=url)
                 elif tool in ("unzip", "tar", "xz", "bsdtar", "ditto"):
-                    finish_requests(owner)
+                    if by_path:
+                        by_path["state"] = "ok"
+                    elif owner or not queue:
+                        finish_requests(owner)
                 continue
 
             if t.startswith("> "):
@@ -199,6 +271,9 @@ def parse(path):
                     p = pod(m.group(1))
                     p["source"] = p["source"] or "cache"
                     finish_requests(m.group(1))
+                    if queue and current is None and run["phase"] == "downloading":
+                        claimed.add(p["name"])  # parallel pass copies straight into Pods/
+                        p["status"] = "cached" if p["source"] == "cache" else "installed"
                 elif (m := DOWNLOADER.match(t)) and owner:
                     kind = m.group(1).lower()
                     pod(owner).update(source=kind if kind in ("git", "http") else "download", status="downloading")
@@ -261,10 +336,17 @@ def parse(path):
                 elif action == "Installing":
                     if p["change"] == "unknown":
                         p["change"] = "updated" if previous else "new"
-                    p["status"] = "installing"
+                    if p["status"] not in ("installed", "cached"):
+                        p["status"] = "installing"
                     current = name
                 else:
-                    p["status"] = "downloading"
+                    p["status"] = "queued"
+                    if name not in queue:
+                        queue.append(name)
+                    if name not in sources:
+                        src = podspec_source(name, version, project)
+                        if src:
+                            sources[name] = src
                 in_manifest = False
                 continue
             if run["phase"] == "downloading" and u.startswith("Removing "):
@@ -293,7 +375,8 @@ def parse(path):
     st = os.stat(path)
     start = getattr(st, "st_birthtime", st.st_ctime)
     run["duration_seconds"] = round(max(0.0, st.st_mtime - start), 1)
-    run["project"] = meta.get("cwd")
+    run["project"] = cwd or meta.get("cwd")
+    run["parallel_downloads"] = bool(queue)
     run["command"] = meta.get("cmd", "pod install")
     return run
 
@@ -325,7 +408,8 @@ def render(run):
     status = run["status"]
     if status == "running":
         status += f" — phase: {run['phase']}" + (f", {run['activity']}" if run["activity"] else "")
-    out.append(f"Status: {status} · {run['duration_seconds']}s")
+    out.append(f"Status: {status} · {run['duration_seconds']}s"
+               + (" · parallel downloads on" if run.get("parallel_downloads") else ""))
     if run["status"].startswith(("failed", "stopped", "interrupted")) and run["messages"]:
         out.append(f"Last CocoaPods message: [!] {run['messages'][-1]}")
     out.append("")
@@ -339,7 +423,8 @@ def render(run):
         for p in sorted(pods, key=lambda p: (order.get(p["change"], 3), -(p.get("bytes") or 0))):
             version = f"{p['previous']} → {p['version']}" if p["previous"] else (p["version"] or "-")
             how = {"installed": f"{p['source'] or 'installed'}", "cached": "download cache", "up to date": "already installed",
-                   "queued": "waiting", "downloading": f"downloading ({p['source'] or '?'})", "installing": "installing",
+                   "queued": "queued" if run.get("parallel_downloads") else "waiting",
+                   "downloading": f"downloading ({p['source'] or '?'})", "installing": "installing",
                    "removed": "removed", "failed": "FAILED"}.get(p["status"], p["status"])
             out.append(f"  {p['name'].ljust(w)}{version.ljust(22)}{p['change'].ljust(12)}{how.ljust(22)}{human(p.get('bytes'))}")
     total = sum(p.get("bytes") or 0 for p in pods)
@@ -396,7 +481,7 @@ def main():
     log = args.log or next(iter(runs_newest_first()), None)
     if not log:
         sys.exit("No PodViz runs found in ~/.podviz/runs. Run `podviz install` in a project first.")
-    run = parse(log)
+    run = parse(log, args.cwd)
     add_sizes(run, args.cwd)
     if args.json:
         run["pods"] = list(run["pods"].values())

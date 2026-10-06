@@ -72,6 +72,10 @@ The summary script covers most needs. These patterns help when you want to grep:
   - `Unable to find a specification`: run `podviz install --repo-update`.
   - CDN 404s or timeouts: a network or proxy problem.
   - A UTF-8 locale error: `podviz` already sets `LANG`.
+- **Installs are slow even on a good connection.** CocoaPods downloads one pod at a time over a single connection by default. Suggest adding this near the top of the Podfile (CocoaPods 1.13+):
+  `install! 'cocoapods', :parallel_pod_downloads => true, :parallel_pod_download_thread_pool_size => 8`
+
+  If the Podfile already has an `install!` line, merge these options into it. PodViz and the summary script both handle parallel runs: they match each transfer to its pod by the podspec's source.
 - **The "fetched" size looks low for a pod.** Very fast clones finish between samples, so the app falls back to the cached copy's size. Sizes in `Pods/` are always accurate.
 - **The `podviz` command is missing.** Open the PodViz menu bar popover, choose ⋯ › *Install "podviz" Terminal Command*, or run `ln -s ~/.podviz/bin/podviz ~/.local/bin/podviz`.
 
