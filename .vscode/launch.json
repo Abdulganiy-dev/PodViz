@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PodViz}",
+            "name": "Debug PodViz",
+            "target": "PodViz",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PodViz"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PodViz}",
+            "name": "Release PodViz",
+            "target": "PodViz",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PodViz"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PodViz}",
+            "name": "Debug pvreplay",
+            "target": "pvreplay",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug pvreplay"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PodViz}",
+            "name": "Release pvreplay",
+            "target": "pvreplay",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release pvreplay"
+        }
+    ]
+}

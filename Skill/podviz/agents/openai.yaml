@@ -1,0 +1,4 @@
+interface:
+  display_name: "PodViz"
+  short_description: "Run pod install with live progress in the PodViz menu bar app and summarize what it did"
+  default_prompt: "Use $podviz to run pod install in this project and summarize what was installed."
