@@ -15,7 +15,8 @@ enum DetailTab: String, CaseIterable {
 
 struct ContentView: View {
     static let width: CGFloat = 400
-    static let height: CGFloat = 640
+    /// Snapshots can render taller to check long lists.
+    nonisolated(unsafe) static var height: CGFloat = 640
 
     @Environment(AppStore.self) private var store
     @State private var tab: DetailTab
@@ -28,9 +29,14 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HeaderView()
             Divider().opacity(0.5)
+            if store.session?.isRunning == false && store.inventory != nil {
+                ModeSwitcher()
+            }
             Group {
-                if let session = store.session {
+                if store.showingSession, let session = store.session {
                     SessionView(session: session, tab: $tab)
+                } else if let inventory = store.inventory {
+                    ProjectOverviewView(inventory: inventory)
                 } else {
                     EmptyStateView()
                 }
@@ -68,7 +74,7 @@ struct HeaderView: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            if let session = store.session {
+            if store.showingSession, let session = store.session {
                 VStack(alignment: .trailing, spacing: 4) {
                     StatusPill(session: session)
                     ElapsedLabel(session: session)
@@ -80,7 +86,7 @@ struct HeaderView: View {
     }
 
     private var subtitle: String {
-        if let session = store.session {
+        if store.showingSession, let session = store.session {
             let origin = session.origin == .terminal ? " · Terminal" : ""
             return "\(AppStore.displayName(session.projectPath)) · \(session.command)\(origin)"
         }
@@ -125,27 +131,40 @@ struct SessionView: View {
     @Binding var tab: DetailTab
 
     var body: some View {
-        let colors = sizeColors
+        let items = session.pods.map { SizeItem(name: $0.name, bytes: $0.displayBytes) }
+        let colors = Theme.sizeColors(items)
         VStack(spacing: 10) {
             ProgressCard(session: session)
             StatsRow(session: session)
             if session.phase == .failed, let error = session.errorMessage, session.activity != "Stopped" {
                 ErrorBanner(message: error)
             } else if session.hasSizes {
-                SizeBreakdownView(session: session, colors: colors)
+                let total = items.reduce(Int64(0)) { $0 + $1.bytes }
+                SizeBreakdownView(items: items, colors: colors, trailing: session.podsFolderBytes.flatMap {
+                    $0 > 0 ? "Pods folder \(Fmt.bytes($0))" : nil
+                } ?? "\(Fmt.bytes(total)) total")
             }
             DetailTabs(session: session, tab: $tab, colors: colors)
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
     }
+}
 
-    /// Largest pods get palette colours, shared by the breakdown bar and the pod rows.
-    private var sizeColors: [String: Color] {
-        let ranked = session.pods.filter { $0.displayBytes > 0 }.sorted { $0.displayBytes > $1.displayBytes }
-        var map: [String: Color] = [:]
-        for (i, pod) in ranked.prefix(Theme.palette.count).enumerated() { map[pod.name] = Theme.palette[i] }
-        return map
+struct ModeSwitcher: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        @Bindable var store = store
+        Picker("Show", selection: $store.mainView) {
+            Text("Project").tag(MainView.project)
+            Text("Last run").tag(MainView.run)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
     }
 }
 
@@ -300,47 +319,42 @@ struct StatTile: View {
     }
 }
 
-struct SizeBreakdownView: View {
-    let session: PodSession
-    let colors: [String: Color]
+struct SizeItem: Identifiable {
+    var id: String { name }
+    let name: String
+    let bytes: Int64
+}
 
-    private struct Segment: Identifiable {
-        let id: String
-        let bytes: Int64
-        let color: Color
-    }
+struct SizeBreakdownView: View {
+    let items: [SizeItem]
+    let colors: [String: Color]
+    let trailing: String
 
     var body: some View {
-        let ranked = session.pods.filter { $0.displayBytes > 0 }.sorted { $0.displayBytes > $1.displayBytes }
-        let total = max(ranked.reduce(Int64(0)) { $0 + $1.displayBytes }, 1)
+        let ranked = items.filter { $0.bytes > 0 }.sorted { $0.bytes > $1.bytes }
+        let total = max(ranked.reduce(Int64(0)) { $0 + $1.bytes }, 1)
         let top = ranked.prefix(Theme.palette.count)
-        let rest = ranked.dropFirst(Theme.palette.count).reduce(Int64(0)) { $0 + $1.displayBytes }
-        let segments = top.map { Segment(id: $0.name, bytes: $0.displayBytes, color: colors[$0.name] ?? .gray) }
-            + (rest > 0 ? [Segment(id: "Other", bytes: rest, color: .gray.opacity(0.5))] : [])
+        let rest = ranked.dropFirst(Theme.palette.count).reduce(Int64(0)) { $0 + $1.bytes }
+        let segments = top.map { (name: $0.name, bytes: $0.bytes, color: colors[$0.name] ?? .gray) }
+            + (rest > 0 ? [(name: "Other", bytes: rest, color: Color.gray.opacity(0.5))] : [])
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Size by pod")
                     .font(.system(size: 11.5, weight: .semibold))
                 Spacer()
-                if let folder = session.podsFolderBytes, folder > 0 {
-                    Text("Pods folder \(Fmt.bytes(folder))")
-                        .font(.system(size: 10.5).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("\(Fmt.bytes(total)) total")
-                        .font(.system(size: 10.5).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                Text(trailing)
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
             GeometryReader { geo in
                 let gaps = CGFloat(max(segments.count - 1, 0)) * 2
                 HStack(spacing: 2) {
-                    ForEach(segments) { segment in
+                    ForEach(segments, id: \.name) { segment in
                         Rectangle()
                             .fill(segment.color)
                             .frame(width: max(2, (geo.size.width - gaps) * CGFloat(segment.bytes) / CGFloat(total)))
-                            .help("\(segment.id) · \(Fmt.bytes(segment.bytes))")
+                            .help("\(segment.name) · \(Fmt.bytes(segment.bytes))")
                     }
                 }
             }
@@ -349,10 +363,10 @@ struct SizeBreakdownView: View {
             .animation(.easeOut(duration: 0.4), value: total)
 
             FlowLayout(spacing: 10, lineSpacing: 4) {
-                ForEach(segments.prefix(5)) { segment in
+                ForEach(segments.prefix(5), id: \.name) { segment in
                     HStack(spacing: 4) {
                         Circle().fill(segment.color).frame(width: 6, height: 6)
-                        Text(segment.id).font(.system(size: 10.5, weight: .medium))
+                        Text(segment.name).font(.system(size: 10.5, weight: .medium))
                         Text(Fmt.bytes(segment.bytes))
                             .font(.system(size: 10.5).monospacedDigit())
                             .foregroundStyle(.secondary)

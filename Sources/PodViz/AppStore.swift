@@ -6,6 +6,11 @@ enum PodCommand {
     case install, update
 }
 
+/// What the popover shows when nothing is running.
+enum MainView: Hashable {
+    case project, run
+}
+
 @MainActor
 @Observable
 final class AppStore {
@@ -18,6 +23,10 @@ final class AppStore {
     var hasUnseenResult = false
     var notice: String?
     var cliInstalled = false
+    var inventory: ProjectInventory?
+    /// Folders with a Podfile found under the folder the user picked (e.g. ios/ and macos/).
+    var podfileCandidates: [String] = []
+    var mainView: MainView = .project
 
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var ticker: Timer?
@@ -41,28 +50,57 @@ final class AppStore {
         self.watcher = watcher
         Notifier.requestAuthorization()
         Task.detached { _ = await ShellEnvironment.shared.resolved() }
+        if let project = selectedProject { podfileCandidates = [project] }
+        loadInventory()
     }
 
     var isRunning: Bool { session?.isRunning == true }
+
+    /// The run is on screen: always while it runs, and afterwards until the user switches to the project.
+    var showingSession: Bool { session != nil && (isRunning || mainView == .run) }
+
+    func loadInventory() {
+        guard let project = selectedProject else {
+            inventory = nil
+            return
+        }
+        if inventory?.podfileDir != project { inventory = ProjectInventory(podfileDir: project) }
+        inventory?.refresh()
+    }
     var canRun: Bool { !isRunning && selectedProject.map(Self.hasPodfile) == true }
 
     // MARK: - Projects
 
     func selectProject(_ url: URL?) {
         guard let url else { return }
-        var path = url.standardizedFileURL.path
-        var isDir: ObjCBool = false
-        FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-        if !isDir.boolValue { path = (path as NSString).deletingLastPathComponent }
-        // Flutter / React Native keep the Podfile in ios/.
-        if !Self.hasPodfile(path), Self.hasPodfile(path + "/ios") { path += "/ios" }
+        let (path, candidates) = Self.resolveProject(url)
+        podfileCandidates = candidates
+        choosePodfile(path)
+        notice = Self.hasPodfile(path) ? nil : "No Podfile found in \(Self.displayName(path))"
+    }
+
+    /// Switch between Podfiles found in the same folder.
+    func choosePodfile(_ path: String) {
         selectedProject = path
         recentProjects.removeAll { $0 == path }
         recentProjects.insert(path, at: 0)
         recentProjects = Array(recentProjects.prefix(8))
         defaults.set(recentProjects, forKey: "recentProjects")
         defaults.set(path, forKey: "selectedProject")
-        notice = Self.hasPodfile(path) ? nil : "No Podfile in \(Self.displayName(path))"
+        mainView = .project
+        loadInventory()
+    }
+
+    /// The folder to use for a picked file or folder, plus every Podfile folder found inside it.
+    /// Flutter and React Native keep the Podfile in ios/, so a project root resolves there.
+    static func resolveProject(_ url: URL) -> (String, [String]) {
+        var path = url.standardizedFileURL.path
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        if !isDir.boolValue { path = (path as NSString).deletingLastPathComponent }
+        var candidates = ProjectInventory.findPodfiles(in: path)
+        if hasPodfile(path) { candidates = [path] + candidates.filter { $0 != path } }
+        return (candidates.first ?? path, candidates)
     }
 
     func chooseFolder() {
@@ -94,6 +132,7 @@ final class AppStore {
         hasUnseenResult = false
         let session = PodSession(origin: .app, projectPath: project, command: "pod " + args.joined(separator: " "))
         self.session = session
+        mainView = .run
         startTicker()
         Task {
             let env = await ShellEnvironment.shared.resolved()
@@ -153,6 +192,7 @@ final class AppStore {
         guard !isRunning else { return }
         session = nil
         hasUnseenResult = false
+        mainView = .project
     }
 
     /// A `podviz` run started in Terminal. App-launched runs take priority.
@@ -160,6 +200,7 @@ final class AppStore {
         if let session, session.isRunning, session.origin == .app { return false }
         session = terminalSession
         hasUnseenResult = false
+        mainView = .run
         startTicker()
         return true
     }
@@ -170,7 +211,10 @@ final class AppStore {
         hasUnseenResult = true
         if finished.origin == .terminal, Self.hasPodfile(finished.projectPath), finished.projectPath != selectedProject {
             selectProject(URL(fileURLWithPath: finished.projectPath))
+        } else if finished.projectPath == selectedProject {
+            loadInventory()
         }
+        mainView = .run
         if !userStopped { Notifier.post(for: finished) }
         userStopped = false
     }
@@ -227,23 +271,5 @@ final class AppStore {
         let name = url.lastPathComponent
         if name == "ios" || name == "iOS" { return url.deletingLastPathComponent().lastPathComponent + "/" + name }
         return name
-    }
-
-    /// Distinct root pods recorded in Podfile.lock.
-    static func lockedPodCount(_ path: String) -> Int? {
-        guard let text = try? String(contentsOfFile: path + "/Podfile.lock", encoding: .utf8) else { return nil }
-        var names = Set<String>()
-        var inPods = false
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line == "PODS:" { inPods = true; continue }
-            guard inPods else { continue }
-            if line.hasPrefix("  - ") {
-                let entry = line.dropFirst(4).split(separator: " ").first ?? ""
-                names.insert(String(entry.split(separator: "/").first ?? entry).trimmingCharacters(in: CharacterSet(charactersIn: "\":")))
-            } else if !line.hasPrefix("    ") {
-                break
-            }
-        }
-        return names.count
     }
 }

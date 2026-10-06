@@ -35,14 +35,20 @@ cp -R Skill/podviz "$APP/Contents/Resources/Agent-Skill/"
 codesign --force --sign - "$APP" >/dev/null
 echo "Built $APP"
 
+# Quit the running copy and wait for it, or `open` can hand off to the instance that is shutting down.
+quit_running() {
+  pkill -x PodViz 2>/dev/null || return 0
+  for _ in $(seq 50); do pgrep -x PodViz >/dev/null || return 0; sleep 0.1; done
+}
+
 if [[ " $* " == *" --install "* ]]; then
-  pkill -x PodViz 2>/dev/null || true
+  quit_running
   rm -rf /Applications/PodViz.app
   cp -R "$APP" /Applications/
   APP=/Applications/PodViz.app
   echo "Installed to $APP"
   open "$APP"
 elif [[ " $* " == *" --open "* ]]; then
-  pkill -x PodViz 2>/dev/null || true
+  quit_running
   open "$APP"
 fi

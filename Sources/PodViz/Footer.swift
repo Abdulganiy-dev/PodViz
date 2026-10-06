@@ -107,7 +107,7 @@ struct FooterView: View {
     private var projectTitle: String {
         guard let path = store.selectedProject else { return "Choose Project" }
         let name = AppStore.displayName(path)
-        return name.count > 26 ? String(name.prefix(25)) + "…" : name
+        return name.count > 20 ? String(name.prefix(19)) + "…" : name
     }
 }
 
@@ -128,14 +128,10 @@ struct EmptyStateView: View {
                     .frame(maxWidth: 290)
             }
 
-            if let project = store.selectedProject {
-                projectCard(project)
-            } else {
-                Button { store.chooseFolder() } label: {
-                    Label("Choose a Project Folder", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(PrimaryButtonStyle())
+            Button { store.chooseFolder() } label: {
+                Label("Choose a Project Folder", systemImage: "folder.badge.plus")
             }
+            .buttonStyle(PrimaryButtonStyle())
 
             terminalCard
             Spacer()
@@ -145,26 +141,6 @@ struct EmptyStateView: View {
                 .padding(.bottom, 10)
         }
         .padding(.horizontal, 22)
-    }
-
-    private func projectCard(_ path: String) -> some View {
-        let hasPodfile = AppStore.hasPodfile(path)
-        let locked = AppStore.lockedPodCount(path)
-        return HStack(spacing: 10) {
-            Image(systemName: hasPodfile ? "doc.text.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 16))
-                .foregroundStyle(hasPodfile ? Theme.orange : Theme.yellow)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(AppStore.displayName(path))
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1)
-                Text(hasPodfile ? (locked.map { "Podfile · \($0) pods in Podfile.lock" } ?? "Podfile · not installed yet") : "No Podfile in this folder")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
-        .card(padding: 11)
     }
 
     private var terminalCard: some View {

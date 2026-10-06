@@ -82,4 +82,10 @@ The summary script covers most needs. These patterns help when you want to grep:
   - `~/.podviz/runs/`: run logs. The app keeps the newest 20.
   - `~/.podviz/bin/podviz`: the wrapper script, rewritten on each app launch.
   - `~/.podviz/sync.rb`: makes Ruby flush output line by line.
+- When nothing is running, the popover shows a project overview for the selected folder:
+  - every pod in Podfile.lock, and whether it's installed in `Pods/`, a local or Flutter plugin pod, only in the download cache, or still to download
+  - each pod's size, the `Pods/` total and the download-cache total
+  - whether `Pods/` is in sync with Podfile.lock
+
+  Point the user there for "what's installed / how much space" questions. From the shell, `du -sh Pods/*` and `cmp Podfile.lock Pods/Manifest.lock` answer the same questions.
 - In the app, the user can also pick a project and press Install or Update directly. Those runs aren't written to `~/.podviz/runs`, so for anything you need to inspect, use `podviz` from the shell.

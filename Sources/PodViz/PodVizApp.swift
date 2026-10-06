@@ -69,9 +69,11 @@ enum SnapshotRunner {
         }
 
         let store = AppStore.shared
-        let cwd = value("--cwd") ?? FileManager.default.currentDirectoryPath
+        let (cwd, candidates) = AppStore.resolveProject(URL(fileURLWithPath: value("--cwd") ?? FileManager.default.currentDirectoryPath))
         store.selectedProject = cwd
+        store.podfileCandidates = candidates
         store.cliInstalled = args.contains("--cli")
+        store.loadInventory()
         if let log = value("--log"), let text = try? String(contentsOfFile: log, encoding: .utf8) {
             var lines = text.components(separatedBy: "\n")
             if let n = value("--lines").flatMap(Int.init) { lines = Array(lines.prefix(n)) }
@@ -81,12 +83,22 @@ enum SnapshotRunner {
             session.ingest(lines)
             if let code = value("--exit").flatMap(Int32.init) { session.finish(exitCode: code) }
             store.session = session
+            store.mainView = args.contains("--project-view") ? .project : .run
         }
         let tab = value("--tab").flatMap(DetailTab.init(rawValue:)) ?? .pods
         let dark = args.contains("--dark")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            render(tab: tab, dark: dark, to: output)
+        if let height = value("--height").flatMap(Double.init) { ContentView.height = height }
+        // Give background size measurements time to land (Pods/ folders can be large).
+        let started = Date()
+        func renderWhenReady() {
+            let busy = store.inventory.map { !$0.isLoaded || $0.isMeasuring } ?? false
+            if busy && Date().timeIntervalSince(started) < 60 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { renderWhenReady() }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { render(tab: tab, dark: dark, to: output) }
+            }
         }
+        renderWhenReady()
         return true
     }
 

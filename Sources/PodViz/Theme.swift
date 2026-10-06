@@ -33,6 +33,14 @@ enum Theme {
         }
     }
 
+    /// Largest pods get palette colours, shared by the size bar and the pod rows.
+    static func sizeColors(_ items: [SizeItem]) -> [String: Color] {
+        let ranked = items.filter { $0.bytes > 0 }.sorted { $0.bytes > $1.bytes }
+        var map: [String: Color] = [:]
+        for (i, item) in ranked.prefix(palette.count).enumerated() { map[item.name] = palette[i] }
+        return map
+    }
+
     static func color(for kind: RequestKind) -> Color {
         switch kind {
         case .cdn: teal
@@ -224,6 +232,8 @@ struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .semibold))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(.white)
             .padding(.horizontal, 13)
             .padding(.vertical, 6)
@@ -241,6 +251,8 @@ struct SoftButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(tint)
             .padding(.horizontal, 11)
             .padding(.vertical, 6)

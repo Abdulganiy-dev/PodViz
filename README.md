@@ -30,7 +30,21 @@ podviz install --repo-update
 `podviz` runs `pod` with `--verbose --no-ansi`, tees the output to `~/.podviz/runs/`, and the app picks it up
 live. Exit codes pass through unchanged, and the terminal hides the noisy CDN debug lines.
 
-## What it shows
+## Project overview
+
+When nothing is running, PodViz shows the selected project. You can pick any folder: it finds the Podfile up to
+four levels down, skipping `Pods`, `node_modules` and build folders. If there are several, such as `ios/` and
+`macos/`, you can switch between them. The overview shows:
+
+- the CocoaPods version, the dependency count and when the project was last installed
+- whether `Pods/` is in sync with `Podfile.lock`, and a warning if the Podfile changed since that install
+- every pod in `Podfile.lock` and its state: installed in `Pods/`, local (Flutter plugins and `:path` pods),
+  in the CocoaPods download cache only (installs without downloading), or still to be downloaded
+- disk space: each pod, the whole `Pods/` folder, and the download cache those pods use
+
+After a run you can switch between **Project** and **Last run**.
+
+## What it shows during a run
 
 | | Source |
 |---|---|
